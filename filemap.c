@@ -1046,8 +1046,43 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 */
 	if (test_bit(key->bit_nr, &key->page->flags))
 		return -1;
+	
+	/* 
+	 * migrating the wait queue implementation
+	 */	
+	pgoff_t index = wait_page->page->index;
+	struct address_space *mapping = wait_page->page->mapping;
+	
+	struct page * page;
+	wait_queue_head_t *q;
+	unsigned long flags;
 
-	return autoremove_wake_function(wait, mode, sync, key);
+
+	while(1){
+		wait_page->nr_to_read--;
+		page = find_get_page(mapping,++index);
+		
+		if(PageUptodate(page)){
+			put_page(page);
+			continue;
+		}else if(PageReadahead(page) || wait_page->nr_to_read <= 0){
+			put_page(page);
+			return autoremove_wake_function(wait, mode, sync, key);
+		}else{	
+			/* migrate othre wait queue */
+			q = page_wait_queue(compound_head(wait_page->page));
+
+			spin_lock_irqsave(&q->lock,flags);
+			__remove_wait_queue(q,wait);
+			spin_unlock_irqrestore(&q->lock,flags);
+			
+			wait_page->page = page;
+			add_page_wait_queue(page,wait);
+			put_page(page);
+			return 0;		
+		}
+
+	}
 }
 
 static void wake_up_page_bit(struct page *page, int bit_nr)
@@ -1230,6 +1265,18 @@ int wait_on_page_bit_killable(struct page *page, int bit_nr)
 	return wait_on_page_bit_common(q, page, bit_nr, TASK_KILLABLE, SHARED, 1);
 }
 EXPORT_SYMBOL(wait_on_page_bit_killable);
+
+/* 
+ * Original : pagemap.h/wait_on_page_locked_killable
+ * Added : number to read parameter
+ * Description : Call it in the generic_file_buffered_read
+ */
+int wait_on_pages_locked_killable(struct page *page, int bit_nr, unsigned long nr_to_read){
+	if(!PageLocked(page))
+		return 0;
+	return wait_on_page_bit_common(page_waitqueue(page), page, bit_nr, TASK_KILLABLE, SHARED, nr_to_read);	
+}
+EXPORT_SYMBOL(wait_on_pages_locked_killable);
 
 /**
  * put_and_wait_on_page_locked - Drop a reference and wait for it to be unlocked
@@ -2099,7 +2146,7 @@ find_page:
 			 * wait_on_page_locked is used to avoid unnecessarily
 			 * serialisations and why it's safe.
 			 */
-			error = wait_on_page_locked_killable(page);
+			error = wait_on_pages_locked_killable(page, last_index - index);
 			if (unlikely(error))
 				goto readpage_error;
 			if (PageUptodate(page))
