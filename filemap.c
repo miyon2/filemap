@@ -1271,10 +1271,10 @@ EXPORT_SYMBOL(wait_on_page_bit_killable);
  * Added : number to read parameter
  * Description : Call it in the generic_file_buffered_read
  */
-int wait_on_pages_locked_killable(struct page *page, int bit_nr, unsigned long nr_to_read){
+int wait_on_pages_locked_killable(struct page *page, unsigned long nr_to_read){
 	if(!PageLocked(page))
 		return 0;
-	return wait_on_page_bit_common(page_waitqueue(page), page, bit_nr, TASK_KILLABLE, SHARED, nr_to_read);	
+	return wait_on_page_bit_common(page_waitqueue(page), page, PG_locked, TASK_KILLABLE, SHARED, nr_to_read);	
 }
 EXPORT_SYMBOL(wait_on_pages_locked_killable);
 
