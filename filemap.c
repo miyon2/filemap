@@ -1028,7 +1028,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	struct wait_page_key *key = arg;
 	struct wait_page_queue *wait_page
 		= container_of(wait, struct wait_page_queue, wait);
-
+	struct page *page = wait_page->page;
 	if (wait_page->page != key->page)
 	       return 0;
 	key->page_match = 1;
@@ -1046,6 +1046,10 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 */
 	if (test_bit(key->bit_nr, &key->page->flags))
 		return -1;
+
+	//here we handle the process in wait_queue
+
+	//find_get_entry(page->mapping,)	
 
 	return autoremove_wake_function(wait, mode, sync, key);
 }
@@ -1231,6 +1235,15 @@ int wait_on_page_bit_killable(struct page *page, int bit_nr)
 }
 EXPORT_SYMBOL(wait_on_page_bit_killable);
 
+static inline int wait_on_mpage_locked_killable(struct page *__page, unsigned long nr_to_read)
+{
+	if (!PageLocked(__page))
+		return 0;
+		
+	struct page *page = compound_head(__page);
+	wait_queue_head_t *q = page_waitqueue(page);
+	return wait_on_page_bit_common(q, page, PG_locked, TASK_KILLABLE, SHARED, nr_to_read);
+}
 /**
  * put_and_wait_on_page_locked - Drop a reference and wait for it to be unlocked
  * @page: The page to wait for.
@@ -1393,6 +1406,18 @@ int __lock_page_killable(struct page *__page)
 }
 EXPORT_SYMBOL_GPL(__lock_page_killable);
 
+int lock_mpage_killable(struct page *__page, unsigned long nr_to_read )
+{
+	might_sleep();
+	if (!trylock_page(page))
+	{
+		struct page *page = compound_head(__page);
+		wait_queue_head_t *q = page_waitqueue(page);
+		return wait_on_page_bit_common(q, page, PG_locked, TASK_KILLABLE,
+						EXCLUSIVE, nr_to_read);
+	}				
+	return 0;
+}
 /*
  * Return values:
  * 1 - page is locked; mmap_sem is still held.
@@ -2099,7 +2124,7 @@ find_page:
 			 * wait_on_page_locked is used to avoid unnecessarily
 			 * serialisations and why it's safe.
 			 */
-			error = wait_on_page_locked_killable(page);
+			error = wait_on_mpage_locked_killable(page,last_index-index);
 			if (unlikely(error))
 				goto readpage_error;
 			if (PageUptodate(page))
@@ -2187,7 +2212,7 @@ page_ok:
 
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
-		error = lock_page_killable(page);
+		error = lock_mpage_killable(page,last_index-index);
 		if (unlikely(error))
 			goto readpage_error;
 
@@ -2225,7 +2250,7 @@ readpage:
 		}
 
 		if (!PageUptodate(page)) {
-			error = lock_page_killable(page);
+			error = lock_mpage_killable(page,last_index-index);
 			if (unlikely(error))
 				goto readpage_error;
 			if (!PageUptodate(page)) {
