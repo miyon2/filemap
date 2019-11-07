@@ -1073,7 +1073,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 			page = page_cache_alloc(mapping);
 			if(!page)
 				return autoremove_wake_function(wait, mode, sync, key);
-			error = add_to_page_cache_lru(page, mapping, index,
+			error = add_to_page_cache_lru(page, mapping, index+1,
 				mapping_gfp_constraint(mapping, GFP_KERNEL));
 			if(error){
 				put_page(page);
@@ -1095,7 +1095,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 				return autoremove_wake_function(wait, mode, sync, key);
 			}
 
-		}else if(PageReadahead(page) || wait_page->nr_to_read <= 0){
+		}else if(PageReadahead(page) || wait_page->nr_to_read <= 1){
 			put_page(page);
 			return autoremove_wake_function(wait, mode, sync, key);
 		}
