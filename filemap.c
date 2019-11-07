@@ -2173,9 +2173,10 @@ find_page:
 
 			if (iocb->ki_flags & IOCB_NOWAIT)
 				goto would_block;
-			page_cache_sync_readahead(mapping,
-					ra, filp,
-					index, last_index - index);
+			/*page_cache_sync_readahead(mapping,
+			 *		ra, filp,
+			 *		index, last_index - index);
+			 */
 			page = find_get_page(mapping, index);
 			if (unlikely(page == NULL))
 				goto no_cached_page;
