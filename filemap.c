@@ -1013,13 +1013,6 @@ struct wait_page_key {
 struct wait_page_queue {
 	struct page *page;
 	int bit_nr;
-	/* 
-	 * page cache 등록된 페이지는 멤버로, index와 mapping을 가지게 된다. 
-	 * add_to_page_cache_lru 함수에서 페이지의 address space와 index가 설정된다. 
-	 * 따라서 end 인덱스나 읽을 개수를 저장하면 된다. wait_on_page_bit_common의 확장성을 
-	 * 고려하여, 각각의 종료 인덱스를 받기보다는 읽을 개수를 저장하는 것이 합리적이다.
-	 */
-	unsigned long nr_to_read;
 	wait_queue_entry_t wait;
 };
 
@@ -1028,16 +1021,6 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	struct wait_page_key *key = arg;
 	struct wait_page_queue *wait_page
 		= container_of(wait, struct wait_page_queue, wait);
-	
-	/* new declaration */
-	pgoff_t index = wait_page->page->index;
-	struct address_space *mapping = wait_page->page->mapping;
-	
-	struct page * page;
-	wait_queue_head_t *q;
-
-	int error =0;
-	int count = 20;
 
 	if (wait_page->page != key->page)
 	       return 0;
@@ -1056,82 +1039,8 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 */
 	if (test_bit(key->bit_nr, &key->page->flags))
 		return -1;
-	
-	/* 
-	 * migrating the wait queue implementation
-	 */
 
-	if(!mapping || !test_bit(PG_lru,&wait_page->page->flags))
-		return autoremove_wake_function(wait, mode, sync, key);
-	
-	while(1){
-		if(wait_page->nr_to_read == 1 || count <=0)
-			return autoremove_wake_function(wait, mode, sync, key); 
-	
-		page = find_get_page(mapping,index+1);
-		if(!page){
-			page = page_cache_alloc(mapping);
-			if(!page)
-				return autoremove_wake_function(wait, mode, sync, key);
-			error = add_to_page_cache_lru(page, mapping, index+1,
-				mapping_gfp_constraint(mapping, GFP_KERNEL));
-			if(error){
-				put_page(page);
-				if (error == -EEXIST) {
-					error = 0;
-					continue; //re-find this page
-				}
-				return autoremove_wake_function(wait, mode, sync, key);
-			}
-			ClearPageError(page);
-			error = mapping->a_ops->readpage(NULL, page);
-			if (unlikely(error)) {
-				if (error == AOP_TRUNCATED_PAGE) {
-					put_page(page);
-					error = 0;
-					continue;
-				}
-				put_page(page);
-				return autoremove_wake_function(wait, mode, sync, key);
-			}
-
-		}else if(PageReadahead(page) || wait_page->nr_to_read <= 1){
-			put_page(page);
-			return autoremove_wake_function(wait, mode, sync, key);
-		}
-    
-    wait_page->nr_to_read--;
-    
-		if(PageUptodate(page)){
-			put_page(page);
-			index++;
-			count--;
-			continue;//find next page
-		}else{	
-			/* migrate othre wait queue */
-			q = page_waitqueue(compound_head(wait_page->page));
-			
-			/* 
-			 * Notice : wake_up_page_bit hold the q->lock 
-			 * */
-			__remove_wait_queue(q,wait);
-			
-			wait_page->page = page;
-			
-			spin_unlock(&q->lock);
-			add_page_wait_queue(page,wait);
-			spin_lock(&q->lock);
-
-			/*
-			 * q = page_waitqueue(compound_head(page));
-			 * __add_wait_queue_entry_tail(q,wait);
-			 * SetPageWaiters(page);
-			 */
-			put_page(page);
-			return 0;		
-		}
-
-	}
+	return autoremove_wake_function(wait, mode, sync, key);
 }
 
 static void wake_up_page_bit(struct page *page, int bit_nr)
@@ -1211,7 +1120,7 @@ enum behavior {
 };
 
 static inline int wait_on_page_bit_common(wait_queue_head_t *q,
-	struct page *page, int bit_nr, int state, enum behavior behavior, unsigned long nr_to_read)
+	struct page *page, int bit_nr, int state, enum behavior behavior)
 {
 	struct wait_page_queue wait_page;
 	wait_queue_entry_t *wait = &wait_page.wait;
@@ -1236,8 +1145,7 @@ static inline int wait_on_page_bit_common(wait_queue_head_t *q,
 	wait->func = wake_page_function;
 	wait_page.page = page;
 	wait_page.bit_nr = bit_nr;
-	wait_page.nr_to_read = nr_to_read;
-	
+
 	for (;;) {
 		spin_lock_irq(&q->lock);
 
@@ -1304,28 +1212,16 @@ static inline int wait_on_page_bit_common(wait_queue_head_t *q,
 void wait_on_page_bit(struct page *page, int bit_nr)
 {
 	wait_queue_head_t *q = page_waitqueue(page);
-	wait_on_page_bit_common(q, page, bit_nr, TASK_UNINTERRUPTIBLE, SHARED, 1);
+	wait_on_page_bit_common(q, page, bit_nr, TASK_UNINTERRUPTIBLE, SHARED);
 }
 EXPORT_SYMBOL(wait_on_page_bit);
 
 int wait_on_page_bit_killable(struct page *page, int bit_nr)
 {
 	wait_queue_head_t *q = page_waitqueue(page);
-	return wait_on_page_bit_common(q, page, bit_nr, TASK_KILLABLE, SHARED, 1);
+	return wait_on_page_bit_common(q, page, bit_nr, TASK_KILLABLE, SHARED);
 }
 EXPORT_SYMBOL(wait_on_page_bit_killable);
-
-/* 
- * Original : pagemap.h/wait_on_page_locked_killable
- * Added : number to read parameter
- * Description : Call it in the generic_file_buffered_read
- */
-int wait_on_pages_locked_killable(struct page *page, unsigned long nr_to_read){
-	if(!PageLocked(page))
-		return 0;
-	return wait_on_page_bit_common(page_waitqueue(page), page, PG_locked, TASK_KILLABLE, SHARED, nr_to_read);	
-}
-EXPORT_SYMBOL(wait_on_pages_locked_killable);
 
 /**
  * put_and_wait_on_page_locked - Drop a reference and wait for it to be unlocked
@@ -1343,7 +1239,7 @@ void put_and_wait_on_page_locked(struct page *page)
 
 	page = compound_head(page);
 	q = page_waitqueue(page);
-	wait_on_page_bit_common(q, page, PG_locked, TASK_UNINTERRUPTIBLE, DROP, 1);
+	wait_on_page_bit_common(q, page, PG_locked, TASK_UNINTERRUPTIBLE, DROP);
 }
 
 /**
@@ -1476,7 +1372,7 @@ void __lock_page(struct page *__page)
 	struct page *page = compound_head(__page);
 	wait_queue_head_t *q = page_waitqueue(page);
 	wait_on_page_bit_common(q, page, PG_locked, TASK_UNINTERRUPTIBLE,
-				EXCLUSIVE, 1);
+				EXCLUSIVE);
 }
 EXPORT_SYMBOL(__lock_page);
 
@@ -1485,7 +1381,7 @@ int __lock_page_killable(struct page *__page)
 	struct page *page = compound_head(__page);
 	wait_queue_head_t *q = page_waitqueue(page);
 	return wait_on_page_bit_common(q, page, PG_locked, TASK_KILLABLE,
-					EXCLUSIVE, 1);
+					EXCLUSIVE);
 }
 EXPORT_SYMBOL_GPL(__lock_page_killable);
 
@@ -2154,13 +2050,18 @@ static ssize_t generic_file_buffered_read(struct kiocb *iocb,
 	prev_offset = ra->prev_pos & (PAGE_SIZE-1);
 	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;
 	offset = *ppos & ~PAGE_MASK;
-	if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                printk("[Miyeon][StartRead]proc name is : %s pid: %d\n", current->comm, current->pid);
+
 	for (;;) {
 		struct page *page;
 		pgoff_t end_index;
 		loff_t isize;
 		unsigned long nr, ret;
+
+		/* [Miyeon] Added */
+		struct page *tmp_page;
+		pgoff_t tmp_index = index;
+		int have_to_alloc;
+		/**/
 
 		cond_resched();
 find_page:
@@ -2168,33 +2069,24 @@ find_page:
 			error = -EINTR;
 			goto out;
 		}
-/* Custom */
-                if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                        printk("[Miyeon][fine_get_page]proc name is : %s pid : %d\n", current->comm, current->pid);
 
 		page = find_get_page(mapping, index);
-		if (!page) {/* Custom */
-                        if(current->comm[0] == 'r' && current->comm[1] == 'e'){
-                                printk("[Miyeon][page_cache Miss1]proc name is : %s pid : %d\n", current->comm, current->pid);
-                                printk("[Miyeon][page_cache Miss2]window start pos : %lu window size : %u\n",ra->start,ra->size);
-                        }
-
+		if (!page) {
+			if(current->comm[0] == 'r' && current->comm[1] == 'e')
+                printk("[Miyeon][MUST called ONCE]proc name is : %s pid: %d and the written is %zd page cache index : %lu\n", current->comm, current->pid, written, index);
 			if (iocb->ki_flags & IOCB_NOWAIT)
 				goto would_block;
-			/*page_cache_sync_readahead(mapping,
-			 *		ra, filp,
-			 *		index, last_index - index);
-			 */
+			// page_cache_sync_readahead(mapping,
+			// 		ra, filp,
+			// 		index, last_index - index);
 			page = find_get_page(mapping, index);
 			if (unlikely(page == NULL))
 				goto no_cached_page;
 		}
 		if (PageReadahead(page)) {
-			if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                                printk("[Miyeon][readahead flag]proc name is : %s pid : %d\n", current->comm, current->pid);
-			page_cache_async_readahead(mapping,
-					ra, filp, page,
-					index, last_index - index);
+			// page_cache_async_readahead(mapping,
+			// 		ra, filp, page,
+			// 		index, last_index - index);
 		}
 		if (!PageUptodate(page)) {
 			if (iocb->ki_flags & IOCB_NOWAIT) {
@@ -2207,11 +2099,7 @@ find_page:
 			 * wait_on_page_locked is used to avoid unnecessarily
 			 * serialisations and why it's safe.
 			 */
-			if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                                printk("[Miyeon][before_sleep]proc name is : %s pid : %d\n", current->comm, current->pid);
-			error = wait_on_pages_locked_killable(page, min(40ul, last_index - index));
-			if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                                printk("[Miyeon][after_sleep]proc name is : %s pid : %d\n", current->comm, current->pid);
+			error = wait_on_page_locked_killable(page);
 			if (unlikely(error))
 				goto readpage_error;
 			if (PageUptodate(page))
@@ -2280,8 +2168,6 @@ page_ok:
 		 * Ok, we have the page, and it's up-to-date, so
 		 * now we can copy it to user space...
 		 */
-		if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                        printk("[Miyeon][page_ok]proc name is : %s pid: %d and the written is %zd page cache index : %lu\n", current->comm, current->pid, written, index);
 
 		ret = copy_page_to_iter(page, offset, nr, iter);
 		offset += ret;
@@ -2371,31 +2257,63 @@ no_cached_page:
 		 * Ok, it wasn't cached, so we need to create a new
 		 * page..
 		 */
-		page = page_cache_alloc(mapping);
-		if (!page) {
-			error = -ENOMEM;
-			goto out;
-		}
-		error = add_to_page_cache_lru(page, mapping, index,
-				mapping_gfp_constraint(mapping, GFP_KERNEL));
-		if (error) {
-			put_page(page);
-			if (error == -EEXIST) {
-				error = 0;
-				goto find_page;
+		/* allocate all pages in request*/
+		tmp_index = index;
+		have_to_alloc = min(40ul, last_index - index);
+
+		if(current->comm[0] == 'r' && current->comm[1] == 'e')
+            printk("[Miyeon][No_cached_page] Make All Pages Requested || proc name is : %s pid: %d and the written is %zd page cache index : %lu\n", current->comm, current->pid, written, index);
+
+		do{
+			tmp_page = find_get_page(mapping, tmp_index);
+			if(!tmp_page){
+				tmp_page = page_cache_alloc(mapping);
+			
+				if (!tmp_page) {
+					error = -ENOMEM;
+					goto out;
+				}
+
+				error = add_to_page_cache_lru(page, mapping, tmp_index,
+					mapping_gfp_constraint(mapping, GFP_KERNEL));
+				if (error) {
+					put_page(page);
+					if (error == -EEXIST) {
+						error = 0;
+						goto find_page;
+					}
+					goto out;
+				}
 			}
-			goto out;
-		}
+
+			tmp_index++;
+			have_to_alloc--;
+		}while(have_to_alloc >= 1);
+
 		goto readpage;
+
+		//[Miyeon] Origin Code
+		// page = page_cache_alloc(mapping);
+		// if (!page) {
+		// 	error = -ENOMEM;
+		// 	goto out;
+		// }
+		// error = add_to_page_cache_lru(page, mapping, index,
+		// 		mapping_gfp_constraint(mapping, GFP_KERNEL));
+		// if (error) {
+		// 	put_page(page);
+		// 	if (error == -EEXIST) {
+		// 		error = 0;
+		// 		goto find_page;
+		// 	}
+		// 	goto out;
+		// }
+		// goto readpage;
 	}
 
 would_block:
 	error = -EAGAIN;
 out:
-       	/* [Miyeon] Added */
-        if(current->comm[0] == 'r' && current->comm[1] == 'e')
-                printk("[Miyeon][out]proc name is : %s pid : %d", current->comm, current->pid);
-
 	ra->prev_pos = prev_index;
 	ra->prev_pos <<= PAGE_SHIFT;
 	ra->prev_pos |= prev_offset;
