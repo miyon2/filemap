@@ -1076,7 +1076,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 		}else if(PageUptodate(page)){
 			put_page(page);
 			continue;
-		}else{	
+		}else if(test_bit(PG_locked,&page->flags)){	
 			/* migrate othre wait queue */
 			q = page_waitqueue(compound_head(wait_page->page));
 			
@@ -1086,10 +1086,16 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 			__remove_wait_queue(q,wait);
 			
 			wait_page->page = page;
-			q = page_waitqueue(compound_head(page));
-			__add_wait_queue_entry_tail(q,wait);
-			SetPageWaiters(page);
+			
+			spin_unlock(&q->lock);
+			add_page_wait_queue(page,wait);
+			spin_lock(&q->lock);
 
+			/*
+			 * q = page_waitqueue(compound_head(page));
+			 * __add_wait_queue_entry_tail(q,wait);
+			 * SetPageWaiters(page);
+			 */
 			put_page(page);
 			return 0;		
 		}
@@ -2171,7 +2177,7 @@ find_page:
 			 */
 			if(current->comm[0] == 'r' && current->comm[1] == 'e')
                                 printk("[Miyeon][before_sleep]proc name is : %s pid : %d\n", current->comm, current->pid);
-			error = wait_on_pages_locked_killable(page, last_index - index);
+			error = wait_on_pages_locked_killable(page, min(40ul, last_index - index));
 			if(current->comm[0] == 'r' && current->comm[1] == 'e')
                                 printk("[Miyeon][after_sleep]proc name is : %s pid : %d\n", current->comm, current->pid);
 			if (unlikely(error))
