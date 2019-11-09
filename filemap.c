@@ -1036,6 +1036,9 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	struct page * page;
 	wait_queue_head_t *q;
 
+	int error =0;
+	int count = 20;
+
 	if (wait_page->page != key->page)
 	       return 0;
 	key->page_match = 1;
@@ -1058,25 +1061,53 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 * migrating the wait queue implementation
 	 */
 
-	if(wait_page->nr_to_read == 1)
-		return autoremove_wake_function(wait, mode, sync, key); 
-	
 	if(!mapping || !test_bit(PG_lru,&wait_page->page->flags))
 		return autoremove_wake_function(wait, mode, sync, key);
 	
 	while(1){
-		wait_page->nr_to_read--;
-		
-		page = find_get_page(mapping,++index);
+		if(wait_page->nr_to_read == 1 || count <=0)
+			return autoremove_wake_function(wait, mode, sync, key); 
+	
+		page = find_get_page(mapping,index+1);
 		if(!page){
-			return autoremove_wake_function(wait,mode,sync,key);
-		}else if(PageReadahead(page) || wait_page->nr_to_read <= 0){
+			page = page_cache_alloc(mapping);
+			if(!page)
+				return autoremove_wake_function(wait, mode, sync, key);
+			error = add_to_page_cache_lru(page, mapping, index+1,
+				mapping_gfp_constraint(mapping, GFP_KERNEL));
+			if(error){
+				put_page(page);
+				if (error == -EEXIST) {
+					error = 0;
+					continue; //re-find this page
+				}
+				return autoremove_wake_function(wait, mode, sync, key);
+			}
+			ClearPageError(page);
+			error = mapping->a_ops->readpage(NULL, page);
+			if (unlikely(error)) {
+				if (error == AOP_TRUNCATED_PAGE) {
+					put_page(page);
+					error = 0;
+					continue;
+				}
+				put_page(page);
+				return autoremove_wake_function(wait, mode, sync, key);
+			}
+
+		}else if(PageReadahead(page) || wait_page->nr_to_read <= 1){
 			put_page(page);
 			return autoremove_wake_function(wait, mode, sync, key);
-		}else if(PageUptodate(page)){
+		}
+    
+    wait_page->nr_to_read--;
+    
+		if(PageUptodate(page)){
 			put_page(page);
-			continue;
-		}else if(test_bit(PG_locked,&page->flags)){	
+			index++;
+			count--;
+			continue;//find next page
+		}else{	
 			/* migrate othre wait queue */
 			q = page_waitqueue(compound_head(wait_page->page));
 			
@@ -2150,9 +2181,10 @@ find_page:
 
 			if (iocb->ki_flags & IOCB_NOWAIT)
 				goto would_block;
-			page_cache_sync_readahead(mapping,
-					ra, filp,
-					index, last_index - index);
+			/*page_cache_sync_readahead(mapping,
+			 *		ra, filp,
+			 *		index, last_index - index);
+			 */
 			page = find_get_page(mapping, index);
 			if (unlikely(page == NULL))
 				goto no_cached_page;
