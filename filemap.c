@@ -1013,10 +1013,10 @@ struct wait_page_key {
 struct wait_page_queue {
 	struct page *page;
 	int bit_nr;
-	/* 
-	 * page cache 등록된 페이지는 멤버로, index와 mapping을 가지게 된다. 
-	 * add_to_page_cache_lru 함수에서 페이지의 address space와 index가 설정된다. 
-	 * 따라서 end 인덱스나 읽을 개수를 저장하면 된다. wait_on_page_bit_common의 확장성을 
+	/*
+	 * page cache 등록된 페이지는 멤버로, index와 mapping을 가지게 된다.
+	 * add_to_page_cache_lru 함수에서 페이지의 address space와 index가 설정된다.
+	 * 따라서 end 인덱스나 읽을 개수를 저장하면 된다. wait_on_page_bit_common의 확장성을
 	 * 고려하여, 각각의 종료 인덱스를 받기보다는 읽을 개수를 저장하는 것이 합리적이다.
 	 */
 	unsigned long nr_to_read;
@@ -1028,16 +1028,17 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	struct wait_page_key *key = arg;
 	struct wait_page_queue *wait_page
 		= container_of(wait, struct wait_page_queue, wait);
-	
+
 	/* new declaration */
 	pgoff_t index = wait_page->page->index;
 	struct address_space *mapping = wait_page->page->mapping;
-	
+
 	struct page * page;
 	wait_queue_head_t *q;
 
 	int error =0;
 	int count = 20;
+	unsigned long flags;
 
 	if (wait_page->page != key->page)
 	       return 0;
@@ -1056,20 +1057,24 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 */
 	if (test_bit(key->bit_nr, &key->page->flags))
 		return -1;
-	
-	/* 
+
+	/*
 	 * migrating the wait queue implementation
 	 */
 
-	if(!mapping || !test_bit(PG_lru,&wait_page->page->flags))
-		return autoremove_wake_function(wait, mode, sync, key);
-	
+//	if(!mapping || !test_bit(PG_lru,&wait_page->page->flags))
+//		return autoremove_wake_function(wait, mode, sync, key);
+
 	while(1){
+
 		if(wait_page->nr_to_read == 1 || count <=0)
-			return autoremove_wake_function(wait, mode, sync, key); 
-	
+			return autoremove_wake_function(wait, mode, sync, key);
+		printk("[Miyeon][Startwake]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+
 		page = find_get_page(mapping,index+1);
 		if(!page){
+			printk("[Miyeon][no page]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+		
 			page = page_cache_alloc(mapping);
 			if(!page)
 				return autoremove_wake_function(wait, mode, sync, key);
@@ -1083,53 +1088,64 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 				}
 				return autoremove_wake_function(wait, mode, sync, key);
 			}
-			ClearPageError(page);
-			error = mapping->a_ops->readpage(NULL, page);
-			if (unlikely(error)) {
-				if (error == AOP_TRUNCATED_PAGE) {
-					put_page(page);
-					error = 0;
-					continue;
-				}
-				put_page(page);
-				return autoremove_wake_function(wait, mode, sync, key);
-			}
+			printk("[Miyeon][after alloc]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
 
+//			ClearPageError(page);
+//			error = mapping->a_ops->readpage(NULL, page);
+//			if (unlikely(error)) {
+//				put_page(page);
+//				count--;
+//				continue;
+//			}	
+			return autoremove_wake_function(wait, mode, sync, key);
 		}else if(PageReadahead(page) || wait_page->nr_to_read <= 1){
 			put_page(page);
+			printk("[Miyeon][readahead]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+
 			return autoremove_wake_function(wait, mode, sync, key);
 		}
-    
-    wait_page->nr_to_read--;
-    
+
 		if(PageUptodate(page)){
+			printk("[Miyeon][updated_gonext]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+
 			put_page(page);
 			index++;
 			count--;
-			continue;//find next page
-		}else{	
-			/* migrate othre wait queue */
-			q = page_waitqueue(compound_head(wait_page->page));
-			
-			/* 
-			 * Notice : wake_up_page_bit hold the q->lock 
-			 * */
-			__remove_wait_queue(q,wait);
-			
-			wait_page->page = page;
-			
-			spin_unlock(&q->lock);
-			add_page_wait_queue(page,wait);
-			spin_lock(&q->lock);
+		    wait_page->nr_to_read--;
 
-			/*
-			 * q = page_waitqueue(compound_head(page));
-			 * __add_wait_queue_entry_tail(q,wait);
-			 * SetPageWaiters(page);
-			 */
-			put_page(page);
-			return 0;		
+			continue;//find next page
 		}
+		if(test_bit(PG_locked, &page->flags)){
+			printk("[Miyeon][PG_locked read]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+			/* migrate othre wait queue */
+
+			//add_page_wait_queue(page,wait);
+
+			q = page_waitqueue(compound_head(page));
+			if(spin_trylock_irqsave(&q->lock,flags)){
+				printk("[Miyeon][del_list]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+
+				list_del_init(&wait->entry);
+				wait_page->page = page;
+				printk("[Miyeon][add_list]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+
+				__add_wait_queue_entry_tail(q,wait);
+				SetPageWaiters(page);
+				spin_unlock_irqrestore(&q->lock,flags);
+				wait_page->nr_to_read--;
+
+				put_page(page);
+				return 0;
+			}
+			else{
+				printk("[Miyeon][locked_nextpg]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+
+				wait_page->nr_to_read--;
+				put_page(page);
+				return autoremove_wake_function(wait, mode, sync, key);
+			}
+		}
+		return autoremove_wake_function(wait, mode, sync, key);
 
 	}
 }
@@ -1237,7 +1253,7 @@ static inline int wait_on_page_bit_common(wait_queue_head_t *q,
 	wait_page.page = page;
 	wait_page.bit_nr = bit_nr;
 	wait_page.nr_to_read = nr_to_read;
-	
+
 	for (;;) {
 		spin_lock_irq(&q->lock);
 
@@ -1315,7 +1331,7 @@ int wait_on_page_bit_killable(struct page *page, int bit_nr)
 }
 EXPORT_SYMBOL(wait_on_page_bit_killable);
 
-/* 
+/*
  * Original : pagemap.h/wait_on_page_locked_killable
  * Added : number to read parameter
  * Description : Call it in the generic_file_buffered_read
@@ -1323,7 +1339,7 @@ EXPORT_SYMBOL(wait_on_page_bit_killable);
 int wait_on_pages_locked_killable(struct page *page, unsigned long nr_to_read){
 	if(!PageLocked(page))
 		return 0;
-	return wait_on_page_bit_common(page_waitqueue(page), page, PG_locked, TASK_KILLABLE, SHARED, nr_to_read);	
+	return wait_on_page_bit_common(page_waitqueue(page), page, PG_locked, TASK_KILLABLE, SHARED, nr_to_read);
 }
 EXPORT_SYMBOL(wait_on_pages_locked_killable);
 
@@ -1489,6 +1505,17 @@ int __lock_page_killable(struct page *__page)
 }
 EXPORT_SYMBOL_GPL(__lock_page_killable);
 
+int lock_pages_killable(struct page *__page,unsigned long nr_to_read)
+{
+	struct page *page = compound_head(__page);
+	wait_queue_head_t *q = page_waitqueue(page);
+
+	might_sleep();
+	if (trylock_page(__page))
+		return 0;
+	return wait_on_page_bit_common(q, page, PG_locked, TASK_KILLABLE,
+					EXCLUSIVE, nr_to_read);
+}
 /*
  * Return values:
  * 1 - page is locked; mmap_sem is still held.
@@ -2301,7 +2328,7 @@ page_ok:
 
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
-		error = lock_page_killable(page);
+		error = lock_pages_killable(page,last_index - index);
 		if (unlikely(error))
 			goto readpage_error;
 
@@ -2339,7 +2366,7 @@ readpage:
 		}
 
 		if (!PageUptodate(page)) {
-			error = lock_page_killable(page);
+			error = lock_pages_killable(page, last_index-index);
 			if (unlikely(error))
 				goto readpage_error;
 			if (!PageUptodate(page)) {
