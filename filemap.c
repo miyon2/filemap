@@ -1074,7 +1074,8 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 		page = find_get_page(mapping,index+1);
 		if(!page){
 			printk("[Miyeon][no page]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
-		
+			return autoremove_wake_function(wait, mode, sync, key);
+/*
 			page = page_cache_alloc(mapping);
 			if(!page)
 				return autoremove_wake_function(wait, mode, sync, key);
@@ -1090,14 +1091,15 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 			}
 			printk("[Miyeon][after alloc]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
 
-//			ClearPageError(page);
-//			error = mapping->a_ops->readpage(NULL, page);
-//			if (unlikely(error)) {
-//				put_page(page);
-//				count--;
-//				continue;
-//			}	
-			return autoremove_wake_function(wait, mode, sync, key);
+			ClearPageError(page);
+			error = mapping->a_ops->readpage(NULL, page);
+			if (unlikely(error)) {
+				put_page(page);
+				count--;
+				continue;
+			}	
+			printk("[Miyeon][after readpage]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+*/
 		}else if(PageReadahead(page) || wait_page->nr_to_read <= 1){
 			put_page(page);
 			printk("[Miyeon][readahead]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
@@ -1106,7 +1108,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 		}
 
 		if(PageUptodate(page)){
-			printk("[Miyeon][updated_gonext]nr_to_read : %lu, index  : %lu \n", wait_page->nr_to_read,index);
+			printk("[Miyeon][updated_gonext]nr_to_read : %lu -> %lu, index  : %lu -> %lu \n", wait_page->nr_to_read,wait_page->nr_to_read-1,index,index+1);
 
 			put_page(page);
 			index++;
